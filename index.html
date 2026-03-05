@@ -16,11 +16,22 @@ V1.05
 - 인식률 개선: 가변 ROI(중앙→확장→전체) + 다중 해상도 패스
 - (지원 시) 토치(플래시) 토글
 - 줌: 하드웨어 줌(지원 시) + 디지털 줌(폴백) + PC 휠/드래그
+
+V1.06
+- Windows: 카메라 반전(좌/우, 상/하) 토글 버튼 추가
+- 반전 상태 localStorage 저장(유지)
+- 미리보기(video)와 인식(canvas) 모두 동일 반전 적용
+
+V1.07
+- ✅ 교육용 태블릿 인식률 최대화: "고해상도 우선" 다단계 getUserMedia 시도(1080p→720p→기본)
+- ✅ 실제 적용 해상도 진단/재시도: 낮은 해상도(예: 640x480)로 붙으면 자동 재요청
+- ✅ 가능한 경우 카메라 트랙 applyConstraints로 고해상도/연속초점/노출/화이트밸런스 보강
+- ✅ 캔버스 전처리(대비/밝기) 적용: BarcodeDetector/jsQR 모두 draw 단계에서 강화
 -->
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>QR 스캐너 (Happy Together) V1.05</title>
+  <title>QR 스캐너 V1.07</title>
 
   <style>
     html,body{ margin:0; padding:0; height:100%; background:#000; color:#fff; }
@@ -29,6 +40,7 @@ V1.05
       width:100%; height:100%;
       object-fit:cover; background:#000; display:block;
       touch-action:none;
+      transform-origin:center center;
     }
 
     #tapToStart{
@@ -100,6 +112,12 @@ V1.05
       <div id="subline">
         <select id="cameraSelect" title="카메라 선택" style="min-width:180px; max-width:60vw; display:none;"></select>
         <button id="torchBtn" class="small" style="display:none;">토치 OFF</button>
+
+        <!-- ✅ Windows에서만 표시될 반전 버튼 -->
+        <button id="flipHBtn" class="small" style="display:none;">좌/우 반전: OFF</button>
+        <button id="flipVBtn" class="small" style="display:none;">상/하 반전: OFF</button>
+        <button id="flipResetBtn" class="small" style="display:none;">반전 초기화</button>
+
         <button id="fsBtn" class="small" style="display:none;">전체화면</button>
       </div>
       <div id="zoomInfo"></div>
@@ -111,7 +129,7 @@ V1.05
 /* ==========================
 버전 (표기 1/3)
 ========================== */
-const APP_VERSION = "V1.05";
+const APP_VERSION = "V1.07";
 
 /* ==========================
 기본 설정(유지)
@@ -132,6 +150,25 @@ const DIGITAL_ZOOM_MIN = 1.0;
 const DIGITAL_ZOOM_MAX = 4.0;
 
 /* ==========================
+✅ 교육용 태블릿 인식률 최대화 옵션
+- 저해상도(640x480 등)로 붙는 기기 1대 대응
+========================== */
+const PREFERRED_STREAM_TRIES = [
+  // 1) 가장 공격적으로 고해상도/후면/연속초점 시도
+  { width: 1920, height: 1080, fps: 30, label: "1080p 우선" },
+  // 2) 다음으로 720p
+  { width: 1280, height: 720,  fps: 30, label: "720p 우선" },
+  // 3) 마지막: 기본(브라우저 결정)
+  { width: null, height: null, fps: 30, label: "기본 해상도" }
+];
+
+// “멀리서” 인식에 특히 중요한 기준(실제 트랙 해상도가 너무 낮으면 재시도)
+const MIN_GOOD_MAX_SIDE = 1000; // max(width,height) < 1000이면 보통 640x480급 가능성
+
+// 캔버스 draw 시 대비/밝기 보강(BarcodeDetector/jsQR 모두에 효과)
+const DRAW_FILTER = "contrast(1.45) brightness(1.10)";
+
+/* ==========================
 요소
 ========================== */
 const video = document.getElementById("video");
@@ -148,6 +185,10 @@ const cameraSelect = document.getElementById("cameraSelect");
 const torchBtn = document.getElementById("torchBtn");
 const fsBtn = document.getElementById("fsBtn");
 
+const flipHBtn = document.getElementById("flipHBtn");
+const flipVBtn = document.getElementById("flipVBtn");
+const flipResetBtn = document.getElementById("flipResetBtn");
+
 /* ==========================
 환경 감지: Windows에서는 전체화면 전환 X
 ========================== */
@@ -156,6 +197,35 @@ const IS_WINDOWS = (() => {
   const ua = (navigator.userAgent || "").toLowerCase();
   return p.includes("win") || ua.includes("windows");
 })();
+
+/* ==========================
+✅ 반전 상태 (Windows용)
+- 미리보기(video) + 인식(canvas) 모두 동일 반전
+- localStorage 저장
+========================== */
+const FLIP_KEY = "qr_scanner_flip_v107";
+let flipH = false; // 좌/우
+let flipV = false; // 상/하
+
+function loadFlipState(){
+  try{
+    const obj = JSON.parse(localStorage.getItem(FLIP_KEY) || "{}");
+    flipH = !!obj.flipH;
+    flipV = !!obj.flipV;
+  }catch(e){
+    flipH = false; flipV = false;
+  }
+}
+function saveFlipState(){
+  localStorage.setItem(FLIP_KEY, JSON.stringify({ flipH, flipV }));
+}
+function applyVideoFlip(){
+  const sx = flipH ? -1 : 1;
+  const sy = flipV ? -1 : 1;
+  video.style.transform = `scale(${sx}, ${sy})`;
+  flipHBtn.textContent = `좌/우 반전: ${flipH ? "ON" : "OFF"}`;
+  flipVBtn.textContent = `상/하 반전: ${flipV ? "ON" : "OFF"}`;
+}
 
 /* ==========================
 진동+효과음(유지)
@@ -214,7 +284,7 @@ fsBtn.addEventListener("click", () => requestFullscreen());
 /* ==========================
 QR 디코더
 - 1) BarcodeDetector(있으면 사용)
-- 2) 미지원 시 jsQR 폴백(Windows에서 특히 유용)
+- 2) 미지원 시 jsQR 폴백
 ========================== */
 let detector = null;
 
@@ -228,7 +298,6 @@ function initBarcodeDetector(){
     return false;
   }
 }
-
 function loadJsQR(){
   return new Promise((resolve, reject) => {
     if(window.jsQR){ resolve(true); return; }
@@ -239,14 +308,12 @@ function loadJsQR(){
     document.head.appendChild(s);
   });
 }
-
 async function initDecoder(){
   const okBD = initBarcodeDetector();
   if(okBD){
     hintEl.textContent = "디코더: BarcodeDetector";
     return true;
   }
-
   try{
     await loadJsQR();
     hintEl.textContent = "디코더: jsQR(폴백)";
@@ -279,7 +346,7 @@ async function listCameras(){
       cameraSelect.appendChild(opt);
     });
 
-    const backIdx = cams.findIndex(c => /back|rear|후면/i.test(c.label));
+    const backIdx = cams.findIndex(c => /back|rear|후면|environment/i.test(c.label));
     if(backIdx >= 0) cameraSelect.selectedIndex = backIdx;
 
   }catch(e){
@@ -288,40 +355,141 @@ async function listCameras(){
 }
 
 /* ==========================
+✅ 스트림 품질 진단/강화
+========================== */
+function getTrackSettings(track){
+  try{ return (track && typeof track.getSettings==="function") ? (track.getSettings()||{}) : {}; }
+  catch(e){ return {}; }
+}
+function getTrackCapabilities(track){
+  try{ return (track && typeof track.getCapabilities==="function") ? (track.getCapabilities()||{}) : {}; }
+  catch(e){ return {}; }
+}
+function maxSideOfSettings(st){
+  const w = Number(st.width||0), h = Number(st.height||0);
+  return Math.max(w,h);
+}
+
+/* ==========================
 카메라 시작/정리
-- 시작 클릭 즉시 권한 요청
-- 실패 시 재요청 버튼 표시
 ========================== */
 let stream = null;
 let videoTrack = null;
 let navigating = false;
 
-async function startCamera(deviceId){
-  stopAll();
-
-  try{
+async function getUserMediaWithQuality(deviceId){
+  // deviceId가 있으면 우선 deviceId 고정, 없으면 후면(environment) 우선
+  for(let i=0;i<PREFERRED_STREAM_TRIES.length;i++){
+    const t = PREFERRED_STREAM_TRIES[i];
     const constraints = {
       video: {
-        ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } }),
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-        frameRate: { ideal: 30, max: 60 },
-        focusMode: "continuous"
+        ...(deviceId
+          ? { deviceId: { exact: deviceId } }
+          : { facingMode: { ideal: "environment" } }
+        ),
+        ...(t.width ? { width: { ideal: t.width }, height: { ideal: t.height } } : {}),
+        frameRate: { ideal: t.fps, max: 60 },
+
+        // 일부 브라우저에서 무시되지만, 지원 시 도움이 되는 힌트
+        // (표준은 아니지만, 지원되는 경우가 있어 함께 둠)
+        focusMode: "continuous",
+        exposureMode: "continuous",
+        whiteBalanceMode: "continuous"
       },
       audio: false
     };
 
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    try{
+      setStatus(`카메라 연결 중… (${t.label})`);
+      const s = await navigator.mediaDevices.getUserMedia(constraints);
+      return { stream: s, triedLabel: t.label };
+    }catch(e){
+      // 다음 시도
+      if(i === PREFERRED_STREAM_TRIES.length-1) throw e;
+    }
+  }
+  throw new Error("getUserMedia failed");
+}
+
+async function boostTrackIfPossible(track){
+  // 가능한 범위에서 연속초점/노출/화이트밸런스/해상도 강화를 applyConstraints로 시도
+  if(!track || typeof track.applyConstraints !== "function") return;
+
+  const caps = getTrackCapabilities(track);
+  const adv = [];
+
+  // 연속 초점/노출/화이트밸런스 (지원되는 경우만)
+  if(caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) adv.push({ focusMode: "continuous" });
+  if(caps.exposureMode && Array.isArray(caps.exposureMode) && caps.exposureMode.includes("continuous")) adv.push({ exposureMode: "continuous" });
+  if(caps.whiteBalanceMode && Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes("continuous")) adv.push({ whiteBalanceMode: "continuous" });
+
+  // 선명도/대비 관련은 표준 caps가 아닌 경우가 많아 무리하게 넣지 않음
+
+  // 해상도는 "ideal"로 한 번 더 강하게 요청(지원 시만)
+  const desired = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 60 } };
+
+  try{
+    if(adv.length){
+      await track.applyConstraints({ ...desired, advanced: adv });
+    }else{
+      await track.applyConstraints(desired);
+    }
+  }catch(e){
+    // 실패해도 무시(기기/브라우저마다 다름)
+  }
+}
+
+async function startCamera(deviceId){
+  stopAll();
+
+  try{
+    // 1) 고해상도 우선 다단계 요청
+    const { stream: s, triedLabel } = await getUserMediaWithQuality(deviceId);
+    stream = s;
+
     video.srcObject = stream;
     await video.play();
 
+    // 2) 카메라 목록
     await listCameras();
     if(deviceId && cameraSelect.style.display !== "none") cameraSelect.value = deviceId;
 
+    // 3) 실제 해상도 진단 + 필요시 강화/재시도
+    videoTrack = stream.getVideoTracks()[0];
+    const st0 = getTrackSettings(videoTrack);
+    const ms0 = maxSideOfSettings(st0);
+
+    // 먼저 applyConstraints로 "붙어있는 트랙"을 강화 시도
+    await boostTrackIfPossible(videoTrack);
+
+    const st1 = getTrackSettings(videoTrack);
+    const ms1 = maxSideOfSettings(st1);
+
+    // 너무 낮은 해상도면(주로 640x480) 한 번 더 "다음 단계"로 재요청
+    // (특정 1대처럼 웹앱에서만 인식률이 떨어지는 케이스에 가장 효과적)
+    if(ms1 && ms1 < MIN_GOOD_MAX_SIDE){
+      // deviceId가 있다면 그대로 두고, 없다면 environment 재시도
+      // (이때는 720p/1080p 우선이 이미 실패했을 가능성이 있어도 재시도 가치가 있음)
+      stopAll();
+      const { stream: s2 } = await getUserMediaWithQuality(deviceId || "");
+      stream = s2;
+      video.srcObject = stream;
+      await video.play();
+      videoTrack = stream.getVideoTracks()[0];
+      await boostTrackIfPossible(videoTrack);
+    }
+
+    // 4) 컨트롤/스캔 시작
     setupCameraControls();
     startScanningLoop();
 
-    setStatus("스캔 중… (모바일: 핀치/드래그, PC: 휠/드래그 줌)");
+    // 상태 표시(실제 해상도 보여주기)
+    const st = getTrackSettings(videoTrack);
+    const w = st.width || video.videoWidth || "?";
+    const h = st.height || video.videoHeight || "?";
+    setStatus(`스캔 중… (실제 해상도: ${w}×${h})`);
+    hintEl.textContent = `디코더: ${detector ? "BarcodeDetector" : (window.jsQR ? "jsQR(폴백)" : "미확인")} · 스트림: ${triedLabel}`;
+
     retryBtn.style.display = "none";
     startMsg.textContent = "";
 
@@ -351,12 +519,15 @@ function stopAll(){
     stream = null;
   }
   video.srcObject = null;
+  videoTrack = null;
 }
 
 /* ==========================
 스캔 루프 (인식률 최우선)
 - ROI 단계 + 다중 해상도
 - BarcodeDetector 또는 jsQR
+- ✅ 반전(flipH/flipV)을 캔버스 draw 단계에 적용
+- ✅ 대비/밝기 전처리(DRAW_FILTER) 적용
 ========================== */
 let scanning = false;
 let lastScanTs = 0;
@@ -367,6 +538,37 @@ const canvas = document.createElement("canvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
 let digitalZoom = 1.0;
+
+function drawRoiToCanvasWithFlip(vw, vh, sx, sy, roiW, roiH, dw, dh){
+  canvas.width = dw;
+  canvas.height = dh;
+
+  ctx.save();
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,dw,dh);
+
+  // ✅ 전처리 필터(대비/밝기)
+  // 일부 브라우저에서만 적용되지만 적용 시 인식거리 향상에 도움이 됨
+  ctx.filter = DRAW_FILTER;
+
+  // 반전 적용
+  if(flipH && flipV){
+    ctx.translate(dw, dh);
+    ctx.scale(-1, -1);
+  }else if(flipH){
+    ctx.translate(dw, 0);
+    ctx.scale(-1, 1);
+  }else if(flipV){
+    ctx.translate(0, dh);
+    ctx.scale(1, -1);
+  }
+
+  ctx.drawImage(video, sx, sy, roiW, roiH, 0, 0, dw, dh);
+
+  // 필터 원복
+  ctx.filter = "none";
+  ctx.restore();
+}
 
 function startScanningLoop(){
   if(scanning) return;
@@ -408,9 +610,7 @@ function startScanningLoop(){
         const dw = Math.max(1, Math.floor(roiW * scale));
         const dh = Math.max(1, Math.floor(roiH * scale));
 
-        canvas.width = dw;
-        canvas.height = dh;
-        ctx.drawImage(video, sx, sy, roiW, roiH, 0, 0, dw, dh);
+        drawRoiToCanvasWithFlip(vw, vh, sx, sy, roiW, roiH, dw, dh);
 
         if(detector){
           try{
@@ -478,9 +678,6 @@ function startScanningLoop(){
 
 /* ==========================
 줌/토치 컨트롤
-- 하드웨어 줌 지원: applyConstraints zoom
-- 미지원: 디지털 줌(digitalZoom)
-- PC: 마우스 휠 줌
 ========================== */
 let zoomCaps = null;
 let zoomValue = null;
@@ -523,7 +720,21 @@ function setupCameraControls(){
     torchBtn.style.display = "none";
   }
 
+  // Windows: 전체화면 숨김 유지
   fsBtn.style.display = IS_WINDOWS ? "none" : "";
+
+  // ✅ Windows에서만 반전 버튼 표시
+  if(IS_WINDOWS){
+    flipHBtn.style.display = "";
+    flipVBtn.style.display = "";
+    flipResetBtn.style.display = "";
+  }else{
+    flipHBtn.style.display = "none";
+    flipVBtn.style.display = "none";
+    flipResetBtn.style.display = "none";
+  }
+
+  applyVideoFlip();
 
   updateZoomInfo();
   enableZoomGestures();
@@ -535,7 +746,6 @@ function quantizeHardwareZoom(v){
   const q = Math.round(v / step) * step;
   return clamp(q, zoomCaps.min, zoomCaps.max);
 }
-
 async function applyHardwareZoom(v){
   if(!videoTrack || !zoomCaps) return;
   zoomValue = quantizeHardwareZoom(v);
@@ -548,17 +758,33 @@ async function applyHardwareZoom(v){
     updateZoomInfo();
   }
 }
-
 function applyDigitalZoom(z){
   digitalZoom = clamp(z, DIGITAL_ZOOM_MIN, DIGITAL_ZOOM_MAX);
   updateZoomInfo();
 }
-
 function updateZoomInfo(){
   const hw = zoomCaps ? `하드웨어 줌: ${zoomValue.toFixed(2)}` : "하드웨어 줌: 미지원";
   const dz = `디지털 줌: ${digitalZoom.toFixed(2)}`;
   zoomInfoEl.textContent = `${hw} · ${dz}  |  모바일: 핀치/드래그, PC: 휠/드래그`;
 }
+
+/* ✅ 반전 버튼 이벤트 */
+flipHBtn.addEventListener("click", () => {
+  flipH = !flipH;
+  saveFlipState();
+  applyVideoFlip();
+});
+flipVBtn.addEventListener("click", () => {
+  flipV = !flipV;
+  saveFlipState();
+  applyVideoFlip();
+});
+flipResetBtn.addEventListener("click", () => {
+  flipH = false;
+  flipV = false;
+  saveFlipState();
+  applyVideoFlip();
+});
 
 /* 포인터 제스처 + 휠 */
 const pointers = new Map();
@@ -696,7 +922,10 @@ tapLayer.addEventListener("click", (e) => {
   startBtn.click();
 });
 
+/* 초기 목록 + ✅ 반전 상태 로드 */
 listCameras();
+loadFlipState();
+applyVideoFlip();
 
 window.addEventListener("beforeunload", stopAll);
 </script>
